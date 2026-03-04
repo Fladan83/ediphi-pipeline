@@ -506,7 +506,7 @@ function AutoConnectSplash({onReady}){
     (async()=>{
       let ediphiOk=false, metabaseOk=false, tenantName="Ediphi";
       try {
-        const projects = await EdiphiAPI.getProjects();
+        await EdiphiAPI.validateAuth();
         ediphiOk=true;
         tenantName="Ediphi"; // proxy handles tenant
       } catch{ /* server creds may not be set yet */ }

@@ -1,6 +1,7 @@
-// Vercel Serverless Function — proxies requests to data.ediphi.com (Metabase)
+// Vercel Serverless Function — proxies SQL queries to data.ediphi.com (Metabase)
 // Keeps API key and device cookie server-side via environment variables
-// Usage: POST /api/metabase { endpoint: "/api/card/123/query/json", method: "GET", body?: {} }
+// Usage: POST /api/metabase { sql: "SELECT ..." }
+// Returns: JSON array of row objects
 
 export default async function handler(req, res) {
   // CORS headers for local dev
@@ -11,12 +12,13 @@ export default async function handler(req, res) {
 
   if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
 
-  const { endpoint, method = "GET", body } = req.body;
-  if (!endpoint) return res.status(400).json({ error: "Missing endpoint" });
+  const { sql } = req.body;
+  if (!sql) return res.status(400).json({ error: "Missing sql" });
 
   // Credentials from Vercel environment variables
   const apiKey = process.env.METABASE_API_KEY;
   const deviceCookie = process.env.METABASE_DEVICE_COOKIE;
+  const dbId = process.env.METABASE_DB_ID || "661";
   if (!apiKey) return res.status(500).json({ error: "Metabase credentials not configured on server" });
 
   const baseUrl = "https://data.ediphi.com";
@@ -30,13 +32,37 @@ export default async function handler(req, res) {
       headers["Cookie"] = `metabase.DEVICE=${deviceCookie}`;
     }
 
-    const fetchOpts = { method, headers };
-    if (body && method !== "GET") fetchOpts.body = JSON.stringify(body);
+    // Use Metabase's native query dataset endpoint
+    const upstream = await fetch(`${baseUrl}/api/dataset`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        database: parseInt(dbId, 10),
+        type: "native",
+        native: { query: sql },
+      }),
+    });
 
-    const upstream = await fetch(`${baseUrl}${endpoint}`, fetchOpts);
-    const data = await upstream.json().catch(() => ({}));
+    const result = await upstream.json().catch(() => ({}));
 
-    return res.status(upstream.status).json(data);
+    if (!upstream.ok) {
+      return res.status(upstream.status).json({ error: result.message || `Metabase error ${upstream.status}` });
+    }
+
+    // Transform Metabase dataset response into array of row objects
+    // Metabase returns { data: { cols: [{name}...], rows: [[val, val]...] } }
+    if (result.data && result.data.cols && result.data.rows) {
+      const colNames = result.data.cols.map(c => c.name);
+      const rows = result.data.rows.map(row => {
+        const obj = {};
+        colNames.forEach((name, i) => { obj[name] = row[i]; });
+        return obj;
+      });
+      return res.status(200).json(rows);
+    }
+
+    // Fallback: return raw result
+    return res.status(200).json(result);
   } catch (err) {
     return res.status(502).json({ error: `Metabase proxy error: ${err.message}` });
   }
