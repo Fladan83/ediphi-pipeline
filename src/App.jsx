@@ -492,100 +492,63 @@ function Alert({type="warning",title,children}){
 
 
 // ══════════════════════════════════════════════════════════════════════════════
-// ── LOGIN SCREEN ─────────────────────────────────────────────────────────────
+// ── AUTO-CONNECT SPLASH ──────────────────────────────────────────────────────
+// Credentials live server-side as Vercel env vars — no user input needed.
+// On mount we probe the proxy endpoints and auto-connect.
 // ══════════════════════════════════════════════════════════════════════════════
-function LoginScreen({onLogin}){
-  const [tenant,setTenant]=useState(""); const [apiToken,setApiToken]=useState("");
-  const [loading,setLoading]=useState(false); const [err,setErr]=useState("");
-  const [showAdvanced,setShowAdvanced]=useState(false);
-  const [metabaseKey,setMetabaseKey]=useState(""); const [metabaseCookie,setMetabaseCookie]=useState("");
+function AutoConnectSplash({onReady}){
+  const [status,setStatus]=useState("connecting"); // connecting | connected | error
+  const [err,setErr]=useState("");
+  const ran=useRef(false);
 
-  const submit = async () => {
-    setErr(""); setLoading(true);
-    try {
-      if (!tenant.trim() || !apiToken.trim()) throw new Error("Tenant and API token are required.");
-      // Validate via proxy
-      let ediphiOk = false, metabaseOk = false;
-      try { await EdiphiAPI.validateAuth(); ediphiOk = true; } catch { ediphiOk = false; }
-      if (metabaseKey.trim()) {
-        try { await MetabaseAPI.validateAuth(); metabaseOk = true; } catch { metabaseOk = false; }
+  useEffect(()=>{
+    if(ran.current) return; ran.current=true;
+    (async()=>{
+      let ediphiOk=false, metabaseOk=false, tenantName="Ediphi";
+      try {
+        const projects = await EdiphiAPI.getProjects();
+        ediphiOk=true;
+        tenantName="Ediphi"; // proxy handles tenant
+      } catch{ /* server creds may not be set yet */ }
+      try { await MetabaseAPI.validateAuth(); metabaseOk=true; } catch{}
+
+      if(!ediphiOk && !metabaseOk){
+        // Neither service reachable — fall back to file-upload mode silently
+        setStatus("connected");
+        setTimeout(()=>onReady({
+          tenant:"", apiToken:"", metabaseKey:"", metabaseCookie:"",
+          ediphiConnected:false, metabaseConnected:false, user:{name:"Local User"}
+        }),600);
+        return;
       }
-      onLogin({
-        tenant: tenant.trim(), apiToken: apiToken.trim(),
-        metabaseKey: metabaseKey.trim(), metabaseCookie: metabaseCookie.trim(),
-        ediphiConnected: ediphiOk, metabaseConnected: metabaseOk,
-        user: { name: tenant.trim() },
-      });
-    } catch(e) { setErr(e.message); }
-    setLoading(false);
-  };
-
-  // Allow skip for file-upload-only mode
-  const skipLogin = () => {
-    onLogin({ tenant:"", apiToken:"", metabaseKey:"", metabaseCookie:"",
-      ediphiConnected:false, metabaseConnected:false, user:{name:"Local User"} });
-  };
+      setStatus("connected");
+      setTimeout(()=>onReady({
+        tenant:tenantName, apiToken:"server", metabaseKey:"server", metabaseCookie:"server",
+        ediphiConnected:ediphiOk, metabaseConnected:metabaseOk,
+        user:{name:tenantName},
+      }),600);
+    })();
+  },[onReady]);
 
   return(
     <div className="min-h-screen bg-gradient-to-br from-slate-900 to-blue-950 flex items-center justify-center p-4">
-      <div className="w-full max-w-md">
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-14 h-14 bg-blue-600 rounded-2xl mb-4 shadow-lg">
-            <span className="text-white text-2xl font-black">E</span></div>
-          <h1 className="text-2xl font-bold text-white">Ediphi Pipeline</h1>
-          <p className="text-blue-300 text-sm mt-1">Connect to your Ediphi instance</p>
-        </div>
-        <div className="bg-white rounded-2xl shadow-2xl p-6">
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-semibold text-gray-700 mb-1.5">Tenant Name</label>
-              <input type="text" placeholder="e.g. dantest" value={tenant} onChange={e=>setTenant(e.target.value)}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"/>
-            </div>
-            <div>
-              <label className="block text-sm font-semibold text-gray-700 mb-1.5">API Token</label>
-              <input type="password" placeholder="Paste your api-token…" value={apiToken}
-                onChange={e=>setApiToken(e.target.value)} onKeyDown={e=>e.key==="Enter"&&submit()}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"/>
-            </div>
+      <div className="w-full max-w-md text-center">
+        <div className="inline-flex items-center justify-center w-14 h-14 bg-blue-600 rounded-2xl mb-4 shadow-lg">
+          <span className="text-white text-2xl font-black">E</span></div>
+        <h1 className="text-2xl font-bold text-white mb-2">Ediphi Pipeline</h1>
+        {status==="connecting"&&(
+          <div className="flex items-center justify-center gap-2 text-blue-300 text-sm">
+            <span className="animate-spin inline-block">⟳</span> Connecting…
           </div>
-
-          {/* Metabase (optional) */}
-          <div className="mt-4">
-            <button onClick={()=>setShowAdvanced(!showAdvanced)}
-              className="text-xs text-blue-600 hover:text-blue-700 font-medium">
-              {showAdvanced?"▾":"▸"} Data Connection (Metabase) — optional
-            </button>
-            {showAdvanced&&(
-              <div className="mt-2 p-3 bg-gray-50 border rounded-lg space-y-3">
-                <p className="text-xs text-gray-500">Connect to data.ediphi.com for live UPC catalog, use groups, and line item queries.</p>
-                <div>
-                  <label className="block text-xs font-semibold text-gray-600 mb-1">Metabase API Key</label>
-                  <input type="password" placeholder="mb_..." value={metabaseKey} onChange={e=>setMetabaseKey(e.target.value)}
-                    className="w-full border border-gray-200 rounded px-2 py-1.5 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-blue-400"/>
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-gray-600 mb-1">Device Cookie (metabase.DEVICE)</label>
-                  <input type="password" placeholder="533611c9-..." value={metabaseCookie} onChange={e=>setMetabaseCookie(e.target.value)}
-                    className="w-full border border-gray-200 rounded px-2 py-1.5 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-blue-400"/>
-                </div>
-              </div>
-            )}
+        )}
+        {status==="connected"&&(
+          <p className="text-green-400 text-sm font-semibold">✓ Connected</p>
+        )}
+        {status==="error"&&(
+          <div className="mt-4 p-3 bg-red-900/30 border border-red-500/40 rounded-lg text-red-300 text-sm">
+            {err}
           </div>
-
-          {err&&<div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">⚠ {err}</div>}
-          <button onClick={submit} disabled={loading}
-            className="mt-5 w-full py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold text-sm disabled:opacity-60 flex items-center justify-center gap-2">
-            {loading?<><span className="animate-spin inline-block">⟳</span> Connecting…</>:"Connect to Ediphi"}
-          </button>
-          <button onClick={skipLogin} className="mt-2 w-full py-2 text-gray-500 hover:text-gray-700 text-sm font-medium">
-            Skip — use file uploads only
-          </button>
-          <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-            <p className="text-xs text-blue-700 font-semibold mb-0.5">🔒 Credentials are handled server-side</p>
-            <p className="text-xs text-blue-600">API tokens are stored as environment variables on the server. They are not exposed to the browser.</p>
-          </div>
-        </div>
+        )}
       </div>
     </div>
   );
@@ -818,7 +781,7 @@ export default function App(){
   const [upcHdrs,setUpcHdrs]=useState([]);
   const [mode,setMode]=useState(null);
 
-  if(!session) return <LoginScreen onLogin={s=>setSession(s)}/>;
+  if(!session) return <AutoConnectSplash onReady={s=>setSession(s)}/>;
 
   // Show project browser if connected to Ediphi API and no target yet
   if(session.ediphiConnected && !target && !upcItems) {
@@ -900,7 +863,7 @@ function HeaderBar({session,setSession,upcItems,setUpcItems,setMode,setTarget,mo
         <div className="w-7 h-7 rounded-full bg-blue-100 flex items-center justify-center">
           <span className="text-blue-700 text-xs font-bold">{(session.user.name||"U")[0].toUpperCase()}</span></div>
         <span className="text-xs font-semibold text-gray-700 hidden sm:inline">{session.user.name}</span>
-        <button onClick={()=>{setSession(null);setUpcItems(null);setMode(null);setTarget(null);}} className="text-xs text-gray-500 hover:text-red-600 font-medium">Sign Out</button>
+        <button onClick={()=>{setSession(null);setUpcItems(null);setMode(null);setTarget(null);}} className="text-xs text-gray-500 hover:text-red-600 font-medium">Reconnect</button>
       </div>
     </div>
   );
