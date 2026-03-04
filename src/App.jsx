@@ -897,7 +897,7 @@ function HeaderBar({session,setSession,upcItems,setUpcItems,setMode,setTarget,mo
 // ══════════════════════════════════════════════════════════════════════════════
 // ── TAKEOFF PIPELINE ─────────────────────────────────────────────────────────
 // ══════════════════════════════════════════════════════════════════════════════
-const T_STEPS=["Upload","Column Setup","Estimate Match","UPC Matching","Export"];
+const T_STEPS=["Upload","Column Setup","Match Review","Export"];
 function TakeoffPipeline({upcItems, target, session}){
   const [step,setStep]=useState(0);
   const [file,setFile]=useState(null); const [rows,setRows]=useState([]); const [headers,setHeaders]=useState([]);
@@ -907,11 +907,12 @@ function TakeoffPipeline({upcItems, target, session}){
   // Estimate match state
   const [estimateItems,setEstimateItems]=useState(null);
   const [estMatchState,setEstMatchState]=useState([]);
-  const [estMatching,setEstMatching]=useState(false);
   const [estActivePick,setEstActivePick]=useState(null);
-  const [estLoading,setEstLoading]=useState(false);
   const [estErr,setEstErr]=useState("");
   const hasEstimate = !!(target?.estimate?.id && session?.metabaseConnected);
+  // Search state
+  const [upcSearch,setUpcSearch]=useState(""); const [upcSearchIdx,setUpcSearchIdx]=useState(null);
+  const [estSearch,setEstSearch]=useState(""); const [estSearchIdx,setEstSearchIdx]=useState(null);
 
   const loadSample=()=>{
     Papa.parse(SAMPLE_TAKEOFF,{header:true,skipEmptyLines:true,
@@ -922,78 +923,91 @@ function TakeoffPipeline({upcItems, target, session}){
     parseFile(f,(data,hdrs,err)=>{if(err||!data){setParseErr(err||"Parse failed");return;}
       setRows(data);setHeaders(hdrs);setFields(autoDetectTakeoff(hdrs));});};
 
-  // ── Estimate match logic ──
-  const runEstimateMatch = async () => {
-    if (!target?.estimate?.id) return;
-    setEstLoading(true); setEstErr("");
-    let items = [];
-    try {
-      items = await MetabaseAPI.loadEstimateLineItems(target.estimate.id);
-      if (!items || !items.length) { setEstErr("No line items found in this estimate — all rows will be added as new."); items = []; }
-      setEstimateItems(items);
-    } catch(e) { setEstErr(`Failed to load estimate: ${e.message}`); setEstimateItems([]); }
-    setEstLoading(false);
+  // ── Run BOTH matches in parallel ──
+  const runAllMatches = async () => {
+    setMatching(true); setEstErr("");
 
-    if (!items.length) {
-      // No estimate items — set all rows to "add new" and show the step
-      const ms = rows.map(row => ({ row, topMatches: [], chosen: null, score: 0, confirmed: true, action: "new", breakdown: null }));
-      setEstMatchState(ms); setStep(2);
-      return;
-    }
+    // Build UPC matches
+    const buildUPC = async () => {
+      const ms = [];
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        const top = getTopMatches(row, upcItems, fields);
+        const best = top[0];
+        const chosen = best.score >= MIN_SCORE ? best.upc : null;
+        ms.push({ row, topMatches: top, chosen, score: best.score, confirmed: best.score >= 75, breakdown: best.breakdown });
+        if (i % 50 === 0) await new Promise(r => setTimeout(r, 0));
+      }
+      return ms;
+    };
 
-    setEstMatching(true);
-    const ms = [];
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      const top = getTopEstimateMatches(row, items, fields);
-      const best = top[0];
-      const chosen = best.score >= MIN_SCORE ? best.item : null;
-      const action = best.score >= 45 ? "overwrite" : "new";
-      ms.push({ row, topMatches: top, chosen, score: best.score, confirmed: best.score >= 75, action, breakdown: best.breakdown });
-      if (i % 50 === 0) await new Promise(r => setTimeout(r, 0));
-    }
-    setEstMatchState(ms); setEstMatching(false); setStep(2);
+    // Build Estimate matches (if applicable)
+    const buildEstimate = async () => {
+      if (!hasEstimate) return rows.map(row => ({ row, topMatches: [], chosen: null, score: 0, confirmed: true, action: "new", breakdown: null }));
+      let items = [];
+      try {
+        items = await MetabaseAPI.loadEstimateLineItems(target.estimate.id);
+        if (!items || !items.length) { setEstErr("No line items in estimate — all rows will be added as new."); items = []; }
+        setEstimateItems(items);
+      } catch (e) { setEstErr(`Estimate load failed: ${e.message}`); setEstimateItems([]); }
+      if (!items.length) return rows.map(row => ({ row, topMatches: [], chosen: null, score: 0, confirmed: true, action: "new", breakdown: null }));
+
+      const ms = [];
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        const top = getTopEstimateMatches(row, items, fields);
+        const best = top[0];
+        const chosen = best.score >= MIN_SCORE ? best.item : null;
+        const action = best.score >= 45 ? "overwrite" : "new";
+        ms.push({ row, topMatches: top, chosen, score: best.score, confirmed: best.score >= 75, action, breakdown: best.breakdown });
+        if (i % 50 === 0) await new Promise(r => setTimeout(r, 0));
+      }
+      return ms;
+    };
+
+    const [upcResults, estResults] = await Promise.all([buildUPC(), buildEstimate()]);
+    setMatchState(upcResults);
+    setEstMatchState(estResults);
+    setMatching(false);
+    setStep(2);
   };
 
-  const estConfirm = i => setEstMatchState(ms => ms.map((m, j) => j === i ? { ...m, confirmed: true, action: "overwrite" } : m));
-  const estReject = i => setEstMatchState(ms => ms.map((m, j) => j === i ? { ...m, chosen: null, confirmed: true, action: "new" } : m));
-  const estPickItem = (i, item) => { setEstMatchState(ms => ms.map((m, j) => j === i ? { ...m, chosen: item, score: 100, confirmed: true, action: "overwrite", breakdown: null } : m)); setEstActivePick(null); };
-  const estSetNew = i => setEstMatchState(ms => ms.map((m, j) => j === i ? { ...m, chosen: null, confirmed: true, action: "new" } : m));
-
-  const estConfirmed_ = estMatchState.filter(m => m.confirmed).length;
-  const estOverwrite_ = estMatchState.filter(m => m.action === "overwrite" && m.chosen).length;
-  const estNew_ = estMatchState.filter(m => m.action === "new" || !m.chosen).length;
-
-  // ── UPC match logic ──
-  const buildMatches=async()=>{
-    setMatching(true);
-    const ms=[];
-    for(let i=0;i<rows.length;i++){
-      const row=rows[i];
-      const top=getTopMatches(row,upcItems,fields);
-      const best=top[0];
-      const chosen=best.score>=MIN_SCORE?best.upc:null;
-      ms.push({row,topMatches:top,chosen,score:best.score,confirmed:best.score>=75,breakdown:best.breakdown});
-      if(i%50===0) await new Promise(r=>setTimeout(r,0));
-    }
-    setMatchState(ms); setMatching(false); setStep(3);
-  };
-
+  // ── UPC match actions ──
   const confirm=i=>setMatchState(ms=>ms.map((m,j)=>j===i?{...m,confirmed:true}:m));
   const reject=i=>setMatchState(ms=>ms.map((m,j)=>j===i?{...m,chosen:null,confirmed:false}:m));
-  const pickUpc=(i,upc)=>{setMatchState(ms=>ms.map((m,j)=>j===i?{...m,chosen:upc,score:100,confirmed:true,breakdown:null}:m));setActivePick(null);};
+  const pickUpc=(i,upc)=>{setMatchState(ms=>ms.map((m,j)=>j===i?{...m,chosen:upc,score:100,confirmed:true,breakdown:null}:m));setActivePick(null);setUpcSearchIdx(null);setUpcSearch("");};
 
+  // ── Estimate match actions ──
+  const estConfirm = i => setEstMatchState(ms => ms.map((m, j) => j === i ? { ...m, confirmed: true, action: "overwrite" } : m));
+  const estSetNew = i => setEstMatchState(ms => ms.map((m, j) => j === i ? { ...m, chosen: null, confirmed: true, action: "new" } : m));
+  const estPickItem = (i, item) => { setEstMatchState(ms => ms.map((m, j) => j === i ? { ...m, chosen: item, score: 100, confirmed: true, action: "overwrite", breakdown: null } : m)); setEstActivePick(null); setEstSearchIdx(null); setEstSearch(""); };
+
+  // ── Counters ──
   const confirmed_=matchState.filter(m=>m.confirmed).length;
   const unmatched_=matchState.filter(m=>!m.chosen).length;
   const needsReview=matchState.filter(m=>m.chosen&&!m.confirmed).length;
+  const estOverwrite_ = estMatchState.filter(m => m.action === "overwrite" && m.chosen).length;
+  const estNew_ = estMatchState.filter(m => m.action === "new" || !m.chosen).length;
+
+  // ── Search helpers ──
+  const filterUpc = (query) => {
+    if (!query.trim()) return [];
+    const q = normStr(query);
+    return upcItems.filter(u => normStr(u.name).includes(q) || normStr(u.item_code||"").includes(q) || normStr(u.category||"").includes(q)).slice(0, 15);
+  };
+  const filterEstItems = (query) => {
+    if (!query.trim() || !estimateItems) return [];
+    const q = normStr(query);
+    return estimateItems.filter(e => normStr(e.name).includes(q) || normStr(e.uom||"").includes(q)).slice(0, 15);
+  };
 
   // ── Export: Ediphi import CSV (id, name, product, quantity) ──
   const exportCsv=()=>{
     const cols=["id","name","product","quantity"];
     const esc=v=>{const s=String(v??"");return s.includes(",")?`"${s.replace(/"/g,'""')}"`:s;};
     const lines=matchState.filter(m=>m.chosen).map((m,i)=>{
-      const u=m.chosen; // UPC match
-      const estMatch = estMatchState[i]; // Estimate match (same index)
+      const u=m.chosen;
+      const estMatch = estMatchState[i];
       const lineItemId = (estMatch && estMatch.action === "overwrite" && estMatch.chosen) ? estMatch.chosen.id : "";
       const name = m.row[fields.name] ?? "";
       const productId = u.id || "";
@@ -1069,210 +1083,176 @@ function TakeoffPipeline({upcItems, target, session}){
           </div>
           <div className="mt-4 flex justify-between">
             <button onClick={()=>setStep(0)} className="px-4 py-2 border rounded-lg text-sm text-gray-600 hover:bg-gray-50">← Back</button>
-            <button disabled={!fields.name||!fields.uom||estLoading||matching}
-              onClick={()=>{
-                if(hasEstimate){
-                  runEstimateMatch();
-                } else {
-                  buildMatches();
-                }
-              }}
+            <button disabled={!fields.name||!fields.uom||matching}
+              onClick={runAllMatches}
               className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium disabled:opacity-40 hover:bg-blue-700 flex items-center gap-2">
-              {estLoading?<><span className="animate-spin">⟳</span> Loading estimate…</>:
-               hasEstimate?"Match Against Estimate →":"Run UPC Matching →"}
+              {matching?<><span className="animate-spin">⟳</span> Running matches…</>:"Run All Matching →"}
             </button>
           </div>
         </div>
       )}
 
-      {/* ── Step 2: Estimate Match ── */}
+      {/* ── Step 2: Combined Match Review ── */}
       {step===2&&(
         <div className="bg-white rounded-2xl shadow-sm border p-6">
           <div className="flex items-center justify-between mb-3">
-            <h2 className="font-semibold text-lg">Estimate Line Item Match</h2>
+            <h2 className="font-semibold text-lg">Match Review</h2>
             <div className="flex gap-2 flex-wrap justify-end">
-              <Badge color="green">{estConfirmed_} confirmed</Badge>
-              <Badge color="blue">{estOverwrite_} overwrite</Badge>
-              <Badge color="yellow">{estNew_} add new</Badge>
+              <Badge color="green">{confirmed_} UPC</Badge>
+              <Badge color="red">{unmatched_} no UPC</Badge>
+              {hasEstimate&&<Badge color="blue">{estOverwrite_} overwrite</Badge>}
+              {hasEstimate&&<Badge color="yellow">{estNew_} new</Badge>}
             </div>
           </div>
-          {estErr&&<div className="mb-3 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">⚠ {estErr}</div>}
-          {estMatching&&<div className="text-center py-8 text-gray-500"><span className="animate-spin inline-block mr-2">⟳</span>Matching against estimate…</div>}
-          {!estMatching&&estMatchState.length>0&&(
-            <div className="space-y-3 max-h-[440px] overflow-y-auto pr-1">
-              {estMatchState.map((m,idx)=>{
-                const cf=m.chosen?confLabel(m.score):null;
-                const isOverwrite = m.action==="overwrite"&&m.chosen;
-                return(
-                  <div key={idx} className={`border rounded-xl p-3 transition-all
-                    ${m.confirmed&&isOverwrite?"border-blue-300 bg-blue-50":
-                      m.confirmed&&!isOverwrite?"border-yellow-300 bg-yellow-50":
-                      !m.chosen?"border-gray-300 bg-gray-50":"border-yellow-300 bg-yellow-50"}`}>
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex-1 min-w-0">
-                        <p className="font-semibold text-sm text-gray-800 truncate">#{idx+1} — {m.row[fields.name]||"(no name)"}</p>
-                        <p className="text-xs text-gray-500 mt-0.5">
-                          Qty: <strong>{fields.qty?m.row[fields.qty]||"—":"—"}</strong>
-                          {fields.uom&&<> · UoM: <strong>{m.row[fields.uom]||"—"}</strong></>}
-                        </p>
-                      </div>
-                      <div className="flex gap-2 flex-shrink-0">
-                        {isOverwrite&&<Badge color="blue">Overwrite</Badge>}
-                        {!isOverwrite&&m.confirmed&&<Badge color="yellow">Add New</Badge>}
-                        {cf&&m.chosen&&<Badge color={cf.c}>{m.score}%</Badge>}
-                      </div>
-                    </div>
-                    {m.chosen&&(
-                      <div className="mt-2 p-2.5 bg-white border rounded-lg">
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="flex-1 min-w-0">
-                            <p className="text-xs font-bold text-gray-400 uppercase tracking-wide mb-0.5">Matched Estimate Line Item</p>
-                            <p className="font-semibold text-sm text-gray-800">{m.chosen.name}</p>
-                            <div className="flex flex-wrap gap-1 mt-1">
-                              {m.chosen.uom&&<Badge color="gray">{m.chosen.uom}</Badge>}
-                              {m.chosen.quantity!=null&&<Badge color="teal">Qty: {m.chosen.quantity}</Badge>}
-                              {m.chosen.product&&<Badge color="purple">Product: {m.chosen.product.substring(0,8)}…</Badge>}
-                            </div>
-                            <div className="mt-2"><ScoreBar score={m.score}/></div>
-                          </div>
-                          <div className="flex gap-1.5 flex-shrink-0">
-                            {!m.confirmed&&<button onClick={()=>estConfirm(idx)} className="px-2.5 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700">Overwrite</button>}
-                            {m.confirmed&&isOverwrite&&<span className="px-2.5 py-1 bg-blue-100 text-blue-700 rounded text-xs">✓ Overwrite</span>}
-                            <button onClick={()=>estSetNew(idx)} className="px-2.5 py-1 border rounded text-xs text-yellow-700 bg-yellow-50 hover:bg-yellow-100">Add New</button>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                    {(!m.chosen||estActivePick===idx)&&(
-                      <div className="mt-2 space-y-1.5">
-                        {m.topMatches&&m.topMatches.filter(t=>t.score>0).length>0?(
-                          <>
-                            <p className="text-xs font-semibold text-gray-500">Top suggestions:</p>
-                            {m.topMatches.filter(t=>t.score>0).map((t,ti)=>(
-                              <button key={ti} onClick={()=>estPickItem(idx,t.item)}
-                                className="w-full text-left p-2 border rounded-lg bg-white hover:bg-blue-50 hover:border-blue-300">
-                                <div className="flex items-center justify-between gap-2">
-                                  <div className="flex-1 min-w-0">
-                                    <p className="font-medium text-sm truncate">{t.item.name}</p>
-                                    <div className="flex gap-1 mt-0.5">
-                                      {t.item.uom&&<Badge color="gray">{t.item.uom}</Badge>}
-                                      {t.item.quantity!=null&&<Badge color="teal">Qty: {t.item.quantity}</Badge>}
-                                    </div>
-                                  </div>
-                                  <div className="w-24"><ScoreBar score={t.score}/></div>
-                                </div>
-                              </button>
-                            ))}
-                          </>
-                        ):(
-                          <p className="text-xs text-gray-400 italic py-2">No matching estimate line items found — will be added as new.</p>
-                        )}
-                        {estActivePick===idx&&<button onClick={()=>setEstActivePick(null)} className="text-xs text-gray-400">Cancel</button>}
-                      </div>
-                    )}
-                    {m.chosen&&estActivePick!==idx&&(
-                      <button onClick={()=>setEstActivePick(idx)} className="mt-1.5 text-xs text-blue-500 hover:text-blue-700">Change match</button>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-          <div className="mt-4 flex justify-between">
-            <button onClick={()=>setStep(1)} className="px-4 py-2 border rounded-lg text-sm text-gray-600 hover:bg-gray-50">← Back</button>
-            <button disabled={estConfirmed_===0||matching}
-              onClick={buildMatches}
-              className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium disabled:opacity-40 hover:bg-blue-700 flex items-center gap-2">
-              {matching?<><span className="animate-spin">⟳</span> Matching…</>:`Run UPC Matching (${estConfirmed_}) →`}
-            </button>
-          </div>
-        </div>
-      )}
+          {estErr&&<div className="mb-3 p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-yellow-700 text-sm">⚠ {estErr}</div>}
 
-      {/* ── Step 3: UPC Match Review ── */}
-      {step===3&&(
-        <div className="bg-white rounded-2xl shadow-sm border p-6">
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="font-semibold text-lg">UPC Match Review</h2>
-            <div className="flex gap-2 flex-wrap justify-end">
-              <Badge color="green">{confirmed_} confirmed</Badge>
-              <Badge color="yellow">{needsReview} review</Badge>
-              <Badge color="red">{unmatched_} unmatched</Badge>
-            </div>
-          </div>
-          <div className="space-y-3 max-h-[440px] overflow-y-auto pr-1">
+          <div className="space-y-4 max-h-[540px] overflow-y-auto pr-1">
             {matchState.map((m,idx)=>{
               const cf=m.chosen?confLabel(m.score):null;
+              const em=estMatchState[idx];
+              const isOverwrite=em&&em.action==="overwrite"&&em.chosen;
               return(
-                <div key={idx} className={`border rounded-xl p-3 transition-all
-                  ${m.confirmed?"border-green-300 bg-green-50":!m.chosen?"border-red-300 bg-red-50":"border-yellow-300 bg-yellow-50"}`}>
-                  <div className="flex items-start justify-between gap-3">
+                <div key={idx} className="border rounded-xl p-3 transition-all bg-white">
+                  {/* Row header */}
+                  <div className="flex items-start justify-between gap-3 mb-2">
                     <div className="flex-1 min-w-0">
                       <p className="font-semibold text-sm text-gray-800 truncate">#{idx+1} — {m.row[fields.name]||"(no name)"}</p>
                       <p className="text-xs text-gray-500 mt-0.5">
+                        {fields.qty&&<>Qty: <strong>{m.row[fields.qty]||"—"}</strong> · </>}
                         UoM: <strong>{m.row[fields.uom]||"—"}</strong>
                         {fields.mf3&&m.row[fields.mf3]&&<> · MF3: <strong>{m.row[fields.mf3]}</strong></>}
-                        {fields.uf3&&m.row[fields.uf3]&&<> · UF3: <strong>{m.row[fields.uf3]}</strong></>}
                       </p>
                     </div>
-                    <div className="flex gap-2 flex-shrink-0">
-                      {cf&&<Badge color={cf.c}>{cf.l} {m.score}%</Badge>}
-                      {!m.chosen&&<Badge color="red">No Match</Badge>}
-                    </div>
                   </div>
-                  {m.chosen&&(
-                    <div className="mt-2 p-2.5 bg-white border rounded-lg">
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="flex-1 min-w-0">
-                          <p className="text-xs font-bold text-gray-400 uppercase tracking-wide mb-0.5">Matched UPC</p>
-                          <p className="font-semibold text-sm text-gray-800">{m.chosen.name}</p>
+
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+                    {/* ── UPC Match Panel ── */}
+                    <div className={`p-2.5 border rounded-lg ${m.confirmed?"border-green-200 bg-green-50":!m.chosen?"border-red-200 bg-red-50":"border-yellow-200 bg-yellow-50"}`}>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <p className="text-xs font-bold text-gray-500 uppercase tracking-wide">UPC / Product</p>
+                        <div className="flex gap-1">
+                          {cf&&<Badge color={cf.c}>{m.score}%</Badge>}
+                          {!m.chosen&&<Badge color="red">None</Badge>}
+                        </div>
+                      </div>
+                      {m.chosen&&(
+                        <div>
+                          <p className="font-semibold text-sm text-gray-800 truncate">{m.chosen.name}</p>
                           <div className="flex flex-wrap gap-1 mt-1">
                             {m.chosen.uom&&<Badge color="gray">{m.chosen.uom}</Badge>}
                             {m.chosen.mf3_code&&<Badge color="blue">{m.chosen.mf3_code}</Badge>}
-                            {m.chosen.uf3_code&&<Badge color="teal">{m.chosen.uf3_code}</Badge>}
                             {m.chosen.category&&<Badge color="purple">{m.chosen.category}</Badge>}
                           </div>
-                          <div className="mt-2"><ScoreBar score={m.score}/></div>
-                        </div>
-                        <div className="flex gap-1.5 flex-shrink-0">
-                          {!m.confirmed&&<button onClick={()=>confirm(idx)} className="px-2.5 py-1 bg-green-600 text-white rounded text-xs hover:bg-green-700">✓</button>}
-                          {m.confirmed&&<span className="px-2.5 py-1 bg-green-100 text-green-700 rounded text-xs">✓</span>}
-                          <button onClick={()=>reject(idx)} className="px-2.5 py-1 border rounded text-xs text-gray-500 hover:bg-gray-50">✕</button>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                  {(!m.chosen||activePick===idx)&&(
-                    <div className="mt-2 space-y-1.5">
-                      <p className="text-xs font-semibold text-gray-500">Top suggestions:</p>
-                      {m.topMatches.filter(t=>t.score>0).map((t,ti)=>(
-                        <button key={ti} onClick={()=>pickUpc(idx,t.upc)}
-                          className="w-full text-left p-2 border rounded-lg bg-white hover:bg-blue-50 hover:border-blue-300">
-                          <div className="flex items-center justify-between gap-2">
-                            <div className="flex-1 min-w-0">
-                              <p className="font-medium text-sm truncate">{t.upc.name}</p>
-                              <div className="flex gap-1 mt-0.5">
-                                {t.upc.uom&&<Badge color="gray">{t.upc.uom}</Badge>}
-                                {t.upc.mf3_code&&<Badge color="blue">{t.upc.mf3_code}</Badge>}
-                              </div>
-                            </div>
-                            <div className="w-24"><ScoreBar score={t.score}/></div>
+                          <div className="flex gap-1.5 mt-2">
+                            {!m.confirmed&&<button onClick={()=>confirm(idx)} className="px-2 py-0.5 bg-green-600 text-white rounded text-xs hover:bg-green-700">✓ Confirm</button>}
+                            {m.confirmed&&<span className="px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs">✓</span>}
+                            <button onClick={()=>{setActivePick(idx);setUpcSearchIdx(null);setUpcSearch("");}} className="px-2 py-0.5 border rounded text-xs text-gray-500 hover:bg-gray-50">Change</button>
+                            <button onClick={()=>reject(idx)} className="px-2 py-0.5 border rounded text-xs text-red-500 hover:bg-red-50">✕</button>
                           </div>
-                        </button>
-                      ))}
-                      {activePick===idx&&<button onClick={()=>setActivePick(null)} className="text-xs text-gray-400">Cancel</button>}
+                        </div>
+                      )}
+                      {/* Suggestions + Search */}
+                      {(!m.chosen||activePick===idx)&&(
+                        <div className="mt-1.5 space-y-1">
+                          {/* Search box */}
+                          <input type="text" placeholder="Search UPC catalog…"
+                            value={upcSearchIdx===idx?upcSearch:""}
+                            onFocus={()=>{setUpcSearchIdx(idx);setUpcSearch("");}}
+                            onChange={e=>{setUpcSearchIdx(idx);setUpcSearch(e.target.value);}}
+                            className="w-full border border-gray-200 rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400"/>
+                          {upcSearchIdx===idx&&upcSearch.trim()?(
+                            filterUpc(upcSearch).map((u,ui)=>(
+                              <button key={ui} onClick={()=>pickUpc(idx,u)}
+                                className="w-full text-left p-1.5 border rounded bg-white hover:bg-blue-50 hover:border-blue-300">
+                                <p className="font-medium text-xs truncate">{u.name}</p>
+                                <div className="flex gap-1 mt-0.5">{u.uom&&<Badge color="gray">{u.uom}</Badge>}{u.mf3_code&&<Badge color="blue">{u.mf3_code}</Badge>}</div>
+                              </button>
+                            ))
+                          ):(
+                            m.topMatches.filter(t=>t.score>0).slice(0,3).map((t,ti)=>(
+                              <button key={ti} onClick={()=>pickUpc(idx,t.upc)}
+                                className="w-full text-left p-1.5 border rounded bg-white hover:bg-blue-50 hover:border-blue-300">
+                                <div className="flex items-center justify-between gap-1">
+                                  <p className="font-medium text-xs truncate flex-1">{t.upc.name}</p>
+                                  <span className="text-xs text-gray-400 flex-shrink-0">{t.score}%</span>
+                                </div>
+                              </button>
+                            ))
+                          )}
+                          {activePick===idx&&<button onClick={()=>setActivePick(null)} className="text-xs text-gray-400">Close</button>}
+                        </div>
+                      )}
                     </div>
-                  )}
-                  {m.chosen&&activePick!==idx&&(
-                    <button onClick={()=>setActivePick(idx)} className="mt-1.5 text-xs text-blue-500 hover:text-blue-700">Change match</button>
-                  )}
+
+                    {/* ── Estimate Match Panel ── */}
+                    {hasEstimate&&em&&(
+                      <div className={`p-2.5 border rounded-lg ${isOverwrite?"border-blue-200 bg-blue-50":"border-yellow-200 bg-yellow-50"}`}>
+                        <div className="flex items-center justify-between mb-1.5">
+                          <p className="text-xs font-bold text-gray-500 uppercase tracking-wide">Estimate Line Item</p>
+                          <div className="flex gap-1">
+                            {isOverwrite&&<Badge color="blue">Overwrite</Badge>}
+                            {!isOverwrite&&<Badge color="yellow">Add New</Badge>}
+                          </div>
+                        </div>
+                        {em.chosen&&(
+                          <div>
+                            <p className="font-semibold text-sm text-gray-800 truncate">{em.chosen.name}</p>
+                            <div className="flex flex-wrap gap-1 mt-1">
+                              {em.chosen.uom&&<Badge color="gray">{em.chosen.uom}</Badge>}
+                              {em.chosen.quantity!=null&&<Badge color="teal">Qty: {em.chosen.quantity}</Badge>}
+                            </div>
+                            <div className="flex gap-1.5 mt-2">
+                              {!em.confirmed&&<button onClick={()=>estConfirm(idx)} className="px-2 py-0.5 bg-blue-600 text-white rounded text-xs hover:bg-blue-700">Overwrite</button>}
+                              {em.confirmed&&isOverwrite&&<span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs">✓ Overwrite</span>}
+                              <button onClick={()=>{setEstActivePick(idx);setEstSearchIdx(null);setEstSearch("");}} className="px-2 py-0.5 border rounded text-xs text-gray-500 hover:bg-gray-50">Change</button>
+                              <button onClick={()=>estSetNew(idx)} className="px-2 py-0.5 border rounded text-xs text-yellow-700 bg-yellow-50 hover:bg-yellow-100">Add New</button>
+                            </div>
+                          </div>
+                        )}
+                        {/* Suggestions + Search */}
+                        {(!em.chosen||estActivePick===idx)&&(
+                          <div className="mt-1.5 space-y-1">
+                            <input type="text" placeholder="Search estimate items…"
+                              value={estSearchIdx===idx?estSearch:""}
+                              onFocus={()=>{setEstSearchIdx(idx);setEstSearch("");}}
+                              onChange={e=>{setEstSearchIdx(idx);setEstSearch(e.target.value);}}
+                              className="w-full border border-gray-200 rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400"/>
+                            {estSearchIdx===idx&&estSearch.trim()?(
+                              filterEstItems(estSearch).map((item,ei)=>(
+                                <button key={ei} onClick={()=>estPickItem(idx,item)}
+                                  className="w-full text-left p-1.5 border rounded bg-white hover:bg-blue-50 hover:border-blue-300">
+                                  <p className="font-medium text-xs truncate">{item.name}</p>
+                                  <div className="flex gap-1 mt-0.5">{item.uom&&<Badge color="gray">{item.uom}</Badge>}{item.quantity!=null&&<Badge color="teal">Qty: {item.quantity}</Badge>}</div>
+                                </button>
+                              ))
+                            ):(
+                              em.topMatches&&em.topMatches.filter(t=>t.score>0).slice(0,3).map((t,ti)=>(
+                                <button key={ti} onClick={()=>estPickItem(idx,t.item)}
+                                  className="w-full text-left p-1.5 border rounded bg-white hover:bg-blue-50 hover:border-blue-300">
+                                  <div className="flex items-center justify-between gap-1">
+                                    <p className="font-medium text-xs truncate flex-1">{t.item.name}</p>
+                                    <span className="text-xs text-gray-400 flex-shrink-0">{t.score}%</span>
+                                  </div>
+                                </button>
+                              ))
+                            )}
+                            {!em.chosen&&!(estSearchIdx===idx&&estSearch.trim())&&(!em.topMatches||em.topMatches.filter(t=>t.score>0).length===0)&&(
+                              <p className="text-xs text-gray-400 italic">No matches — will be added as new. Use search to find a specific item.</p>
+                            )}
+                            {estActivePick===idx&&<button onClick={()=>setEstActivePick(null)} className="text-xs text-gray-400">Close</button>}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </div>
               );
             })}
           </div>
+
           <div className="mt-4 flex justify-between">
-            <button onClick={()=>setStep(hasEstimate?2:1)} className="px-4 py-2 border rounded-lg text-sm text-gray-600 hover:bg-gray-50">← Back</button>
-            <button onClick={()=>setStep(4)} disabled={confirmed_===0}
+            <button onClick={()=>setStep(1)} className="px-4 py-2 border rounded-lg text-sm text-gray-600 hover:bg-gray-50">← Back</button>
+            <button onClick={()=>setStep(3)} disabled={confirmed_===0}
               className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium disabled:opacity-40 hover:bg-blue-700">
               Export ({confirmed_}) →
             </button>
@@ -1280,8 +1260,8 @@ function TakeoffPipeline({upcItems, target, session}){
         </div>
       )}
 
-      {/* ── Step 4: Export ── */}
-      {step===4&&(
+      {/* ── Step 3: Export ── */}
+      {step===3&&(
         <div className="bg-white rounded-2xl shadow-sm border p-6">
           <h2 className="font-semibold text-lg mb-3">Export — Ediphi Import CSV</h2>
           <div className="flex gap-2 mb-4">
@@ -1317,7 +1297,7 @@ function TakeoffPipeline({upcItems, target, session}){
           </div>
           {exported&&<p className="text-center text-green-600 text-sm mb-3">✓ Downloaded!</p>}
           <div className="flex justify-between mt-4">
-            <button onClick={()=>setStep(3)} className="px-4 py-2 border rounded-lg text-sm text-gray-600 hover:bg-gray-50">← Back</button>
+            <button onClick={()=>setStep(2)} className="px-4 py-2 border rounded-lg text-sm text-gray-600 hover:bg-gray-50">← Back</button>
             <button onClick={()=>{setStep(0);setFile(null);setRows([]);setHeaders([]);setMatchState([]);setEstMatchState([]);setEstimateItems(null);setExported(false);}}
               className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg text-sm">↺ Start Over</button>
           </div>
