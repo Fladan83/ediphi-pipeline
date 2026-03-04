@@ -910,9 +910,13 @@ function TakeoffPipeline({upcItems, target, session}){
   const [estActivePick,setEstActivePick]=useState(null);
   const [estErr,setEstErr]=useState("");
   const hasEstimate = !!(target?.estimate?.id && session?.metabaseConnected);
+  // Expand state: per-row panel toggle ("est" | "upc" | null)
+  const [expandPanel,setExpandPanel]=useState({});
   // Search state
   const [upcSearch,setUpcSearch]=useState(""); const [upcSearchIdx,setUpcSearchIdx]=useState(null);
   const [estSearch,setEstSearch]=useState(""); const [estSearchIdx,setEstSearchIdx]=useState(null);
+
+  const togglePanel=(idx,panel)=>setExpandPanel(prev=>({...prev,[idx]:prev[idx]===panel?null:panel}));
 
   const loadSample=()=>{
     Papa.parse(SAMPLE_TAKEOFF,{header:true,skipEmptyLines:true,
@@ -1092,29 +1096,30 @@ function TakeoffPipeline({upcItems, target, session}){
         </div>
       )}
 
-      {/* ── Step 2: Combined Match Review ── */}
+      {/* ── Step 2: Match Review ── */}
       {step===2&&(
         <div className="bg-white rounded-2xl shadow-sm border p-6">
           <div className="flex items-center justify-between mb-3">
             <h2 className="font-semibold text-lg">Match Review</h2>
             <div className="flex gap-2 flex-wrap justify-end">
-              <Badge color="green">{confirmed_} UPC</Badge>
-              <Badge color="red">{unmatched_} no UPC</Badge>
+              <Badge color="green">{confirmed_} matched</Badge>
+              <Badge color="red">{unmatched_} unmatched</Badge>
               {hasEstimate&&<Badge color="blue">{estOverwrite_} overwrite</Badge>}
               {hasEstimate&&<Badge color="yellow">{estNew_} new</Badge>}
             </div>
           </div>
-          {estErr&&<div className="mb-3 p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-yellow-700 text-sm">⚠ {estErr}</div>}
+          {estErr&&<div className="mb-3 p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-yellow-700 text-sm">{estErr}</div>}
 
-          <div className="space-y-4 max-h-[540px] overflow-y-auto pr-1">
+          <div className="space-y-3 max-h-[560px] overflow-y-auto pr-1">
             {matchState.map((m,idx)=>{
               const cf=m.chosen?confLabel(m.score):null;
               const em=estMatchState[idx];
               const isOverwrite=em&&em.action==="overwrite"&&em.chosen;
+              const panel=expandPanel[idx]||null;
               return(
-                <div key={idx} className="border rounded-xl p-3 transition-all bg-white">
-                  {/* Row header */}
-                  <div className="flex items-start justify-between gap-3 mb-2">
+                <div key={idx} className={`border rounded-xl p-3 transition-all ${m.confirmed&&(!hasEstimate||em?.confirmed)?"bg-gray-50 border-gray-200":"bg-white"}`}>
+                  {/* ── Row header ── */}
+                  <div className="flex items-start justify-between gap-3">
                     <div className="flex-1 min-w-0">
                       <p className="font-semibold text-sm text-gray-800 truncate">#{idx+1} — {m.row[fields.name]||"(no name)"}</p>
                       <p className="text-xs text-gray-500 mt-0.5">
@@ -1123,138 +1128,167 @@ function TakeoffPipeline({upcItems, target, session}){
                         {fields.mf3&&m.row[fields.mf3]&&<> · MF3: <strong>{m.row[fields.mf3]}</strong></>}
                       </p>
                     </div>
+                    <div className="flex gap-1 flex-shrink-0">
+                      {m.confirmed&&<span className="px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs font-medium">UPC ✓</span>}
+                      {hasEstimate&&isOverwrite&&em.confirmed&&<span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs font-medium">Est ✓</span>}
+                      {hasEstimate&&(!isOverwrite)&&<span className="px-2 py-0.5 bg-yellow-100 text-yellow-700 rounded text-xs font-medium">New</span>}
+                    </div>
                   </div>
 
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
-                    {/* ── UPC Match Panel ── */}
-                    <div className={`p-2.5 border rounded-lg ${m.confirmed?"border-green-200 bg-green-50":!m.chosen?"border-red-200 bg-red-50":"border-yellow-200 bg-yellow-50"}`}>
-                      <div className="flex items-center justify-between mb-1.5">
-                        <p className="text-xs font-bold text-gray-500 uppercase tracking-wide">UPC / Product</p>
-                        <div className="flex gap-1">
+                  {/* ── Compact match summary ── */}
+                  <div className="mt-2 flex flex-col gap-1.5">
+                    {/* UPC line */}
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className="font-bold text-gray-400 w-8 flex-shrink-0 uppercase">UPC</span>
+                      {m.chosen?(
+                        <div className="flex items-center gap-1.5 flex-1 min-w-0">
+                          <span className="text-gray-800 truncate font-medium">{m.chosen.name}</span>
+                          {m.chosen.uom&&<Badge color="gray">{m.chosen.uom}</Badge>}
                           {cf&&<Badge color={cf.c}>{m.score}%</Badge>}
-                          {!m.chosen&&<Badge color="red">None</Badge>}
                         </div>
-                      </div>
-                      {m.chosen&&(
-                        <div>
-                          <p className="font-semibold text-sm text-gray-800 truncate">{m.chosen.name}</p>
-                          <div className="flex flex-wrap gap-1 mt-1">
-                            {m.chosen.uom&&<Badge color="gray">{m.chosen.uom}</Badge>}
-                            {m.chosen.mf3_code&&<Badge color="blue">{m.chosen.mf3_code}</Badge>}
-                            {m.chosen.category&&<Badge color="purple">{m.chosen.category}</Badge>}
-                          </div>
-                          <div className="flex gap-1.5 mt-2">
-                            {!m.confirmed&&<button onClick={()=>confirm(idx)} className="px-2 py-0.5 bg-green-600 text-white rounded text-xs hover:bg-green-700">✓ Confirm</button>}
-                            {m.confirmed&&<span className="px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs">✓</span>}
-                            <button onClick={()=>{setActivePick(idx);setUpcSearchIdx(null);setUpcSearch("");}} className="px-2 py-0.5 border rounded text-xs text-gray-500 hover:bg-gray-50">Change</button>
-                            <button onClick={()=>reject(idx)} className="px-2 py-0.5 border rounded text-xs text-red-500 hover:bg-red-50">✕</button>
-                          </div>
-                        </div>
-                      )}
-                      {/* Suggestions + Search */}
-                      {(!m.chosen||activePick===idx)&&(
-                        <div className="mt-1.5 space-y-1">
-                          {/* Search box */}
-                          <input type="text" placeholder="Search UPC catalog…"
-                            value={upcSearchIdx===idx?upcSearch:""}
-                            onFocus={()=>{setUpcSearchIdx(idx);setUpcSearch("");}}
-                            onChange={e=>{setUpcSearchIdx(idx);setUpcSearch(e.target.value);}}
-                            className="w-full border border-gray-200 rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400"/>
-                          {upcSearchIdx===idx&&upcSearch.trim()?(
-                            filterUpc(upcSearch).map((u,ui)=>(
-                              <button key={ui} onClick={()=>pickUpc(idx,u)}
-                                className="w-full text-left p-1.5 border rounded bg-white hover:bg-blue-50 hover:border-blue-300">
-                                <p className="font-medium text-xs truncate">{u.name}</p>
-                                <div className="flex gap-1 mt-0.5">{u.uom&&<Badge color="gray">{u.uom}</Badge>}{u.mf3_code&&<Badge color="blue">{u.mf3_code}</Badge>}</div>
-                              </button>
-                            ))
-                          ):(
-                            m.topMatches.filter(t=>t.score>0).slice(0,3).map((t,ti)=>(
-                              <button key={ti} onClick={()=>pickUpc(idx,t.upc)}
-                                className="w-full text-left p-1.5 border rounded bg-white hover:bg-blue-50 hover:border-blue-300">
-                                <div className="flex items-center justify-between gap-1">
-                                  <p className="font-medium text-xs truncate flex-1">{t.upc.name}</p>
-                                  <span className="text-xs text-gray-400 flex-shrink-0">{t.score}%</span>
-                                </div>
-                              </button>
-                            ))
-                          )}
-                          {activePick===idx&&<button onClick={()=>setActivePick(null)} className="text-xs text-gray-400">Close</button>}
-                        </div>
+                      ):(
+                        <span className="text-red-500 italic">No match</span>
                       )}
                     </div>
-
-                    {/* ── Estimate Match Panel ── */}
+                    {/* Estimate line */}
                     {hasEstimate&&em&&(
-                      <div className={`p-2.5 border rounded-lg ${isOverwrite?"border-blue-200 bg-blue-50":"border-yellow-200 bg-yellow-50"}`}>
-                        <div className="flex items-center justify-between mb-1.5">
-                          <p className="text-xs font-bold text-gray-500 uppercase tracking-wide">Estimate Line Item</p>
-                          <div className="flex gap-1">
-                            {isOverwrite&&<Badge color="blue">Overwrite</Badge>}
-                            {!isOverwrite&&<Badge color="yellow">Add New</Badge>}
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className="font-bold text-gray-400 w-8 flex-shrink-0 uppercase">Est</span>
+                        {em.chosen?(
+                          <div className="flex items-center gap-1.5 flex-1 min-w-0">
+                            <span className="text-gray-800 truncate font-medium">{em.chosen.name}</span>
+                            {em.chosen.uom&&<Badge color="gray">{em.chosen.uom}</Badge>}
+                            <Badge color="blue">{em.score}%</Badge>
                           </div>
-                        </div>
-                        {em.chosen&&(
-                          <div>
-                            <p className="font-semibold text-sm text-gray-800 truncate">{em.chosen.name}</p>
-                            <div className="flex flex-wrap gap-1 mt-1">
-                              {em.chosen.uom&&<Badge color="gray">{em.chosen.uom}</Badge>}
-                              {em.chosen.quantity!=null&&<Badge color="teal">Qty: {em.chosen.quantity}</Badge>}
-                            </div>
-                            <div className="flex gap-1.5 mt-2">
-                              {!em.confirmed&&<button onClick={()=>estConfirm(idx)} className="px-2 py-0.5 bg-blue-600 text-white rounded text-xs hover:bg-blue-700">Overwrite</button>}
-                              {em.confirmed&&isOverwrite&&<span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs">✓ Overwrite</span>}
-                              <button onClick={()=>{setEstActivePick(idx);setEstSearchIdx(null);setEstSearch("");}} className="px-2 py-0.5 border rounded text-xs text-gray-500 hover:bg-gray-50">Change</button>
-                              <button onClick={()=>estSetNew(idx)} className="px-2 py-0.5 border rounded text-xs text-yellow-700 bg-yellow-50 hover:bg-yellow-100">Add New</button>
-                            </div>
-                          </div>
-                        )}
-                        {/* Suggestions + Search */}
-                        {(!em.chosen||estActivePick===idx)&&(
-                          <div className="mt-1.5 space-y-1">
-                            <input type="text" placeholder="Search estimate items…"
-                              value={estSearchIdx===idx?estSearch:""}
-                              onFocus={()=>{setEstSearchIdx(idx);setEstSearch("");}}
-                              onChange={e=>{setEstSearchIdx(idx);setEstSearch(e.target.value);}}
-                              className="w-full border border-gray-200 rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400"/>
-                            {estSearchIdx===idx&&estSearch.trim()?(
-                              filterEstItems(estSearch).map((item,ei)=>(
-                                <button key={ei} onClick={()=>estPickItem(idx,item)}
-                                  className="w-full text-left p-1.5 border rounded bg-white hover:bg-blue-50 hover:border-blue-300">
-                                  <p className="font-medium text-xs truncate">{item.name}</p>
-                                  <div className="flex gap-1 mt-0.5">{item.uom&&<Badge color="gray">{item.uom}</Badge>}{item.quantity!=null&&<Badge color="teal">Qty: {item.quantity}</Badge>}</div>
-                                </button>
-                              ))
-                            ):(
-                              em.topMatches&&em.topMatches.filter(t=>t.score>0).slice(0,3).map((t,ti)=>(
-                                <button key={ti} onClick={()=>estPickItem(idx,t.item)}
-                                  className="w-full text-left p-1.5 border rounded bg-white hover:bg-blue-50 hover:border-blue-300">
-                                  <div className="flex items-center justify-between gap-1">
-                                    <p className="font-medium text-xs truncate flex-1">{t.item.name}</p>
-                                    <span className="text-xs text-gray-400 flex-shrink-0">{t.score}%</span>
-                                  </div>
-                                </button>
-                              ))
-                            )}
-                            {!em.chosen&&!(estSearchIdx===idx&&estSearch.trim())&&(!em.topMatches||em.topMatches.filter(t=>t.score>0).length===0)&&(
-                              <p className="text-xs text-gray-400 italic">No matches — will be added as new. Use search to find a specific item.</p>
-                            )}
-                            {estActivePick===idx&&<button onClick={()=>setEstActivePick(null)} className="text-xs text-gray-400">Close</button>}
-                          </div>
+                        ):(
+                          <span className="text-yellow-600 italic">Add as new</span>
                         )}
                       </div>
                     )}
                   </div>
+
+                  {/* ── Action buttons ── */}
+                  <div className="mt-2 flex gap-1.5 flex-wrap">
+                    {!m.confirmed&&m.chosen&&(
+                      <button onClick={()=>{confirm(idx);if(hasEstimate&&em&&!em.confirmed&&em.chosen)estConfirm(idx);}}
+                        className="px-2.5 py-1 bg-green-600 text-white rounded text-xs font-medium hover:bg-green-700">Accept</button>
+                    )}
+                    {m.confirmed&&(!hasEstimate||!em||em.confirmed)&&(
+                      <span className="px-2.5 py-1 bg-green-100 text-green-700 rounded text-xs font-medium">✓ Accepted</span>
+                    )}
+                    <button onClick={()=>togglePanel(idx,"est")}
+                      className={`px-2.5 py-1 border rounded text-xs font-medium ${panel==="est"?"bg-blue-100 border-blue-300 text-blue-700":"text-gray-500 hover:bg-gray-50"}`}>
+                      {hasEstimate?"Estimate Matches":"Ranked Matches"} {panel==="est"?"▴":"▾"}
+                    </button>
+                    <button onClick={()=>togglePanel(idx,"upc")}
+                      className={`px-2.5 py-1 border rounded text-xs font-medium ${panel==="upc"?"bg-purple-100 border-purple-300 text-purple-700":"text-gray-500 hover:bg-gray-50"}`}>
+                      Search UPC {panel==="upc"?"▴":"▾"}
+                    </button>
+                    {m.chosen&&!m.confirmed&&(
+                      <button onClick={()=>reject(idx)} className="px-2.5 py-1 border rounded text-xs text-red-500 hover:bg-red-50">Reject</button>
+                    )}
+                    {hasEstimate&&em&&isOverwrite&&(
+                      <button onClick={()=>estSetNew(idx)} className="px-2.5 py-1 border rounded text-xs text-yellow-700 hover:bg-yellow-50">Add New Instead</button>
+                    )}
+                  </div>
+
+                  {/* ── Expandable: Estimate Matches (ranked) ── */}
+                  {panel==="est"&&(
+                    <div className="mt-2 border-t pt-2 space-y-1">
+                      <p className="text-xs font-bold text-gray-500 uppercase tracking-wide mb-1">{hasEstimate?"Estimate Line Items by Rank":"UPC Matches by Rank"}</p>
+                      {hasEstimate&&em?(
+                        <>
+                          <input type="text" placeholder="Search estimate items…"
+                            value={estSearchIdx===idx?estSearch:""}
+                            onFocus={()=>{setEstSearchIdx(idx);setEstSearch("");}}
+                            onChange={e=>{setEstSearchIdx(idx);setEstSearch(e.target.value);}}
+                            className="w-full border border-gray-200 rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400 mb-1"/>
+                          {estSearchIdx===idx&&estSearch.trim()?(
+                            filterEstItems(estSearch).map((item,ei)=>(
+                              <button key={ei} onClick={()=>{estPickItem(idx,item);togglePanel(idx,"est");}}
+                                className="w-full text-left p-1.5 border rounded bg-white hover:bg-blue-50 hover:border-blue-300">
+                                <div className="flex items-center justify-between gap-1">
+                                  <p className="font-medium text-xs truncate flex-1">{item.name}</p>
+                                  <div className="flex gap-1">{item.uom&&<Badge color="gray">{item.uom}</Badge>}{item.quantity!=null&&<Badge color="teal">Qty: {item.quantity}</Badge>}</div>
+                                </div>
+                              </button>
+                            ))
+                          ):(
+                            em.topMatches&&em.topMatches.filter(t=>t.score>0).map((t,ti)=>(
+                              <button key={ti} onClick={()=>{estPickItem(idx,t.item);togglePanel(idx,"est");}}
+                                className={`w-full text-left p-1.5 border rounded hover:bg-blue-50 hover:border-blue-300 ${em.chosen&&em.chosen.id===t.item.id?"bg-blue-50 border-blue-300":"bg-white"}`}>
+                                <div className="flex items-center justify-between gap-1">
+                                  <p className="font-medium text-xs truncate flex-1">{t.item.name}</p>
+                                  <div className="flex gap-1">
+                                    {t.item.uom&&<Badge color="gray">{t.item.uom}</Badge>}
+                                    <span className="text-xs text-gray-400 flex-shrink-0">{t.score}%</span>
+                                  </div>
+                                </div>
+                              </button>
+                            ))
+                          )}
+                          {(!em.topMatches||em.topMatches.filter(t=>t.score>0).length===0)&&!(estSearchIdx===idx&&estSearch.trim())&&(
+                            <p className="text-xs text-gray-400 italic">No ranked matches. Use search above to find a specific item.</p>
+                          )}
+                        </>
+                      ):(
+                        /* No estimate — show ranked UPC matches instead */
+                        m.topMatches.filter(t=>t.score>0).map((t,ti)=>(
+                          <button key={ti} onClick={()=>{pickUpc(idx,t.upc);togglePanel(idx,"est");}}
+                            className={`w-full text-left p-1.5 border rounded hover:bg-blue-50 hover:border-blue-300 ${m.chosen&&m.chosen.id===t.upc.id?"bg-blue-50 border-blue-300":"bg-white"}`}>
+                            <div className="flex items-center justify-between gap-1">
+                              <p className="font-medium text-xs truncate flex-1">{t.upc.name}</p>
+                              <div className="flex gap-1">
+                                {t.upc.uom&&<Badge color="gray">{t.upc.uom}</Badge>}
+                                <span className="text-xs text-gray-400 flex-shrink-0">{t.score}%</span>
+                              </div>
+                            </div>
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  )}
+
+                  {/* ── Expandable: UPC Search ── */}
+                  {panel==="upc"&&(
+                    <div className="mt-2 border-t pt-2 space-y-1">
+                      <p className="text-xs font-bold text-gray-500 uppercase tracking-wide mb-1">Search UPC Catalog</p>
+                      <input type="text" placeholder="Type to search by name, code, or category…"
+                        value={upcSearchIdx===idx?upcSearch:""}
+                        onFocus={()=>{setUpcSearchIdx(idx);setUpcSearch("");}}
+                        onChange={e=>{setUpcSearchIdx(idx);setUpcSearch(e.target.value);}}
+                        className="w-full border border-gray-200 rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-purple-400 mb-1"/>
+                      {upcSearchIdx===idx&&upcSearch.trim()?(
+                        filterUpc(upcSearch).map((u,ui)=>(
+                          <button key={ui} onClick={()=>{pickUpc(idx,u);togglePanel(idx,"upc");}}
+                            className="w-full text-left p-1.5 border rounded bg-white hover:bg-purple-50 hover:border-purple-300">
+                            <div className="flex items-center justify-between gap-1">
+                              <p className="font-medium text-xs truncate flex-1">{u.name}</p>
+                              <div className="flex gap-1">
+                                {u.uom&&<Badge color="gray">{u.uom}</Badge>}
+                                {u.item_code&&<Badge color="purple">{u.item_code}</Badge>}
+                              </div>
+                            </div>
+                          </button>
+                        ))
+                      ):(
+                        <p className="text-xs text-gray-400 italic">Start typing to search the UPC catalog.</p>
+                      )}
+                      {upcSearchIdx===idx&&upcSearch.trim()&&filterUpc(upcSearch).length===0&&(
+                        <p className="text-xs text-gray-400 italic">No results found.</p>
+                      )}
+                    </div>
+                  )}
                 </div>
               );
             })}
           </div>
 
           <div className="mt-4 flex justify-between">
-            <button onClick={()=>setStep(1)} className="px-4 py-2 border rounded-lg text-sm text-gray-600 hover:bg-gray-50">← Back</button>
+            <button onClick={()=>setStep(1)} className="px-4 py-2 border rounded-lg text-sm text-gray-600 hover:bg-gray-50">&larr; Back</button>
             <button onClick={()=>setStep(3)} disabled={confirmed_===0}
               className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium disabled:opacity-40 hover:bg-blue-700">
-              Export ({confirmed_}) →
+              Export ({confirmed_}) &rarr;
             </button>
           </div>
         </div>
