@@ -927,49 +927,54 @@ function TakeoffPipeline({upcItems, target, session}){
     parseFile(f,(data,hdrs,err)=>{if(err||!data){setParseErr(err||"Parse failed");return;}
       setRows(data);setHeaders(hdrs);setFields(autoDetectTakeoff(hdrs));});};
 
-  // ── Run BOTH matches in parallel ──
+  // ── Run UPC matching, then estimate matching (using UPC product IDs) ──
   const runAllMatches = async () => {
     setMatching(true); setEstErr("");
 
-    // Build UPC matches
-    const buildUPC = async () => {
-      const ms = [];
-      for (let i = 0; i < rows.length; i++) {
-        const row = rows[i];
-        const top = getTopMatches(row, upcItems, fields);
-        const best = top[0];
-        const chosen = best.score >= MIN_SCORE ? best.upc : null;
-        ms.push({ row, topMatches: top, chosen, score: best.score, confirmed: best.score >= 75, breakdown: best.breakdown });
-        if (i % 50 === 0) await new Promise(r => setTimeout(r, 0));
+    // Step 1: Start loading estimate items from Metabase while UPC matching runs
+    let estItemsPromise = null;
+    if (hasEstimate) {
+      estItemsPromise = MetabaseAPI.loadEstimateLineItems(target.estimate.id)
+        .then(items => { if (!items||!items.length) { setEstErr("No line items in estimate — all rows will be added as new."); return []; } setEstimateItems(items); return items; })
+        .catch(e => { setEstErr(`Estimate load failed: ${e.message}`); setEstimateItems([]); return []; });
+    }
+
+    // Step 2: Build UPC matches
+    const upcResults = [];
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const top = getTopMatches(row, upcItems, fields);
+      const best = top[0];
+      const chosen = best.score >= MIN_SCORE ? best.upc : null;
+      upcResults.push({ row, topMatches: top, chosen, score: best.score, confirmed: best.score >= 75, breakdown: best.breakdown });
+      if (i % 50 === 0) await new Promise(r => setTimeout(r, 0));
+    }
+
+    // Step 3: Build estimate matches using matched UPC product IDs
+    let estResults;
+    if (!hasEstimate) {
+      estResults = rows.map(row => ({ row, topMatches: [], chosen: null, score: 0, confirmed: true, action: "new", breakdown: null }));
+    } else {
+      const items = await estItemsPromise;
+      if (!items.length) {
+        estResults = rows.map(row => ({ row, topMatches: [], chosen: null, score: 0, confirmed: true, action: "new", breakdown: null }));
+      } else {
+        estResults = [];
+        for (let i = 0; i < rows.length; i++) {
+          const row = rows[i];
+          // Attach matched UPC product ID so estimate scoring can use it
+          const matchedProductId = upcResults[i].chosen ? upcResults[i].chosen.id : null;
+          const augmentedRow = { ...row, _matchedProductId: matchedProductId };
+          const top = getTopEstimateMatches(augmentedRow, items, fields);
+          const best = top[0];
+          const chosen = best.score >= MIN_SCORE ? best.item : null;
+          const action = best.score >= 45 ? "overwrite" : "new";
+          estResults.push({ row, topMatches: top, chosen, score: best.score, confirmed: best.score >= 75, action, breakdown: best.breakdown });
+          if (i % 50 === 0) await new Promise(r => setTimeout(r, 0));
+        }
       }
-      return ms;
-    };
+    }
 
-    // Build Estimate matches (if applicable)
-    const buildEstimate = async () => {
-      if (!hasEstimate) return rows.map(row => ({ row, topMatches: [], chosen: null, score: 0, confirmed: true, action: "new", breakdown: null }));
-      let items = [];
-      try {
-        items = await MetabaseAPI.loadEstimateLineItems(target.estimate.id);
-        if (!items || !items.length) { setEstErr("No line items in estimate — all rows will be added as new."); items = []; }
-        setEstimateItems(items);
-      } catch (e) { setEstErr(`Estimate load failed: ${e.message}`); setEstimateItems([]); }
-      if (!items.length) return rows.map(row => ({ row, topMatches: [], chosen: null, score: 0, confirmed: true, action: "new", breakdown: null }));
-
-      const ms = [];
-      for (let i = 0; i < rows.length; i++) {
-        const row = rows[i];
-        const top = getTopEstimateMatches(row, items, fields);
-        const best = top[0];
-        const chosen = best.score >= MIN_SCORE ? best.item : null;
-        const action = best.score >= 45 ? "overwrite" : "new";
-        ms.push({ row, topMatches: top, chosen, score: best.score, confirmed: best.score >= 75, action, breakdown: best.breakdown });
-        if (i % 50 === 0) await new Promise(r => setTimeout(r, 0));
-      }
-      return ms;
-    };
-
-    const [upcResults, estResults] = await Promise.all([buildUPC(), buildEstimate()]);
     setMatchState(upcResults);
     setEstMatchState(estResults);
     setMatching(false);
