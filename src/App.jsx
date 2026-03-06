@@ -576,62 +576,176 @@ function Alert({type="warning",title,children}){
 
 
 // ══════════════════════════════════════════════════════════════════════════════
-// ── AUTO-CONNECT SPLASH ──────────────────────────────────────────────────────
-// Credentials live server-side as Vercel env vars — no user input needed.
-// On mount we probe the proxy endpoints and auto-connect.
+// ── LOGIN SCREEN ─────────────────────────────────────────────────────────────
+// Authenticates against the Users table via /api/auth, then auto-connects
+// Ediphi + Metabase services using server-side credentials.
 // ══════════════════════════════════════════════════════════════════════════════
-function AutoConnectSplash({onReady}){
-  const [status,setStatus]=useState("connecting"); // connecting | connected | error
+// Simple hash for localStorage password storage (not cryptographic — fine for QA gate)
+const simpleHash = (str) => {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) { h = ((h << 5) - h + str.charCodeAt(i)) | 0; }
+  return "h_" + Math.abs(h).toString(36);
+};
+const CRED_KEY = "ediphi_user_creds";
+const UserCreds = {
+  _load() { try { return JSON.parse(localStorage.getItem(CRED_KEY) || "{}"); } catch { return {}; } },
+  get(email) { return this._load()[email.toLowerCase().trim()] || null; },
+  set(email, passwordHash) {
+    const all = this._load();
+    all[email.toLowerCase().trim()] = { passwordHash, ts: Date.now() };
+    try { localStorage.setItem(CRED_KEY, JSON.stringify(all)); } catch {}
+  },
+  clear(email) {
+    const all = this._load();
+    delete all[email.toLowerCase().trim()];
+    try { localStorage.setItem(CRED_KEY, JSON.stringify(all)); } catch {}
+  },
+};
+
+function LoginScreen({onReady}){
+  const [email,setEmail]=useState("");
+  const [password,setPassword]=useState("");
+  const [confirmPw,setConfirmPw]=useState("");
+  const [phase,setPhase]=useState("email"); // email | setup | login | connecting
   const [err,setErr]=useState("");
-  const ran=useRef(false);
+  const [userName,setUserName]=useState("");
 
-  useEffect(()=>{
-    if(ran.current) return; ran.current=true;
-    (async()=>{
-      let ediphiOk=false, metabaseOk=false, tenantName="Ediphi";
-      try {
-        await EdiphiAPI.validateAuth();
-        ediphiOk=true;
-        tenantName="Ediphi"; // proxy handles tenant
-      } catch{ /* server creds may not be set yet */ }
-      try { await MetabaseAPI.validateAuth(); metabaseOk=true; } catch{}
+  // Step 1: Validate email against server approved list
+  const checkEmail = async (e) => {
+    e.preventDefault();
+    if(!email.trim()) return;
+    setErr("");
 
-      if(!ediphiOk && !metabaseOk){
-        // Neither service reachable — fall back to file-upload mode silently
-        setStatus("connected");
-        setTimeout(()=>onReady({
-          tenant:"", apiToken:"", metabaseKey:"", metabaseCookie:"",
-          ediphiConnected:false, metabaseConnected:false, user:{name:"Local User"}
-        }),600);
+    try {
+      const res = await fetch("/api/auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: email.trim() }),
+      });
+      const data = await res.json();
+      if(!res.ok || !data.ok) {
+        setErr(data.error || "Email not authorized");
         return;
       }
-      setStatus("connected");
-      setTimeout(()=>onReady({
-        tenant:tenantName, apiToken:"server", metabaseKey:"server", metabaseCookie:"server",
-        ediphiConnected:ediphiOk, metabaseConnected:metabaseOk,
-        user:{name:tenantName},
-      }),600);
-    })();
-  },[onReady]);
+      setUserName(data.user.name);
+      // Check if this email already has a password stored locally
+      const cred = UserCreds.get(email);
+      setPhase(cred ? "login" : "setup");
+    } catch {
+      setErr("Unable to reach server. Please try again.");
+    }
+  };
+
+  // Step 2a: First-time — set password
+  const handleSetup = async (e) => {
+    e.preventDefault();
+    if(!password || password.length < 4) { setErr("Password must be at least 4 characters"); return; }
+    if(password !== confirmPw) { setErr("Passwords do not match"); return; }
+    setErr("");
+    UserCreds.set(email, simpleHash(password));
+    await connectServices();
+  };
+
+  // Step 2b: Returning — verify password
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    const cred = UserCreds.get(email);
+    if(!cred || cred.passwordHash !== simpleHash(password)) {
+      setErr("Incorrect password");
+      return;
+    }
+    setErr("");
+    await connectServices();
+  };
+
+  // Step 3: Connect Ediphi + Metabase and proceed
+  const connectServices = async () => {
+    setPhase("connecting");
+    let ediphiOk=false, metabaseOk=false;
+    try { await EdiphiAPI.validateAuth(); ediphiOk=true; } catch{}
+    try { await MetabaseAPI.validateAuth(); metabaseOk=true; } catch{}
+    onReady({
+      tenant: "Ediphi", apiToken: "server", metabaseKey: "server", metabaseCookie: "server",
+      ediphiConnected: ediphiOk, metabaseConnected: metabaseOk,
+      user: { email: email.trim().toLowerCase(), name: userName || email.split("@")[0] },
+    });
+  };
+
+  const inputCls = "w-full px-3 py-2.5 bg-white/10 border border-white/20 rounded-lg text-white placeholder-blue-300/50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm";
+  const btnCls = "w-full py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg text-sm font-semibold transition-colors";
 
   return(
     <div className="min-h-screen bg-gradient-to-br from-slate-900 to-blue-950 flex items-center justify-center p-4">
-      <div className="w-full max-w-md text-center">
-        <div className="inline-flex items-center justify-center w-14 h-14 bg-blue-600 rounded-2xl mb-4 shadow-lg">
-          <span className="text-white text-2xl font-black">E</span></div>
-        <h1 className="text-2xl font-bold text-white mb-2">Ediphi Pipeline</h1>
-        {status==="connecting"&&(
-          <div className="flex items-center justify-center gap-2 text-blue-300 text-sm">
-            <span className="animate-spin inline-block">⟳</span> Connecting…
+      <div className="w-full max-w-sm">
+        <div className="text-center mb-6">
+          <div className="inline-flex items-center justify-center w-14 h-14 bg-blue-600 rounded-2xl mb-4 shadow-lg">
+            <span className="text-white text-2xl font-black">E</span>
+          </div>
+          <h1 className="text-2xl font-bold text-white mb-1">Ediphi Pipeline</h1>
+          <p className="text-blue-300 text-sm">
+            {phase==="email"&&"Enter your email to get started"}
+            {phase==="setup"&&`Welcome, ${userName}! Create a password.`}
+            {phase==="login"&&`Welcome back, ${userName}`}
+            {phase==="connecting"&&"Connecting services…"}
+          </p>
+        </div>
+
+        {phase==="connecting"&&(
+          <div className="text-center">
+            <span className="animate-spin inline-block text-blue-300 text-2xl">&#x27F3;</span>
           </div>
         )}
-        {status==="connected"&&(
-          <p className="text-green-400 text-sm font-semibold">✓ Connected</p>
+
+        {/* Email entry */}
+        {phase==="email"&&(
+          <form onSubmit={checkEmail} className="bg-white/10 backdrop-blur-sm border border-white/20 rounded-2xl p-6 space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-blue-200 mb-1">Email</label>
+              <input type="email" value={email} onChange={e=>setEmail(e.target.value)}
+                placeholder="you@company.com" autoComplete="email" autoFocus className={inputCls}/>
+            </div>
+            {err&&<div className="p-3 bg-red-900/30 border border-red-500/40 rounded-lg text-red-300 text-sm">{err}</div>}
+            <button type="submit" disabled={!email.trim()} className={btnCls}>Continue</button>
+          </form>
         )}
-        {status==="error"&&(
-          <div className="mt-4 p-3 bg-red-900/30 border border-red-500/40 rounded-lg text-red-300 text-sm">
-            {err}
-          </div>
+
+        {/* First-time password setup */}
+        {phase==="setup"&&(
+          <form onSubmit={handleSetup} className="bg-white/10 backdrop-blur-sm border border-white/20 rounded-2xl p-6 space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-blue-200 mb-1">Create Password</label>
+              <input type="password" value={password} onChange={e=>setPassword(e.target.value)}
+                placeholder="Choose a password" autoFocus autoComplete="new-password" className={inputCls}/>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-blue-200 mb-1">Confirm Password</label>
+              <input type="password" value={confirmPw} onChange={e=>setConfirmPw(e.target.value)}
+                placeholder="Re-enter password" autoComplete="new-password" className={inputCls}/>
+            </div>
+            {err&&<div className="p-3 bg-red-900/30 border border-red-500/40 rounded-lg text-red-300 text-sm">{err}</div>}
+            <button type="submit" disabled={!password||!confirmPw} className={btnCls}>Set Password &amp; Sign In</button>
+            <button type="button" onClick={()=>{setPhase("email");setPassword("");setConfirmPw("");setErr("");}}
+              className="w-full text-blue-300 text-xs hover:text-white text-center">&larr; Back</button>
+          </form>
+        )}
+
+        {/* Returning user login */}
+        {phase==="login"&&(
+          <form onSubmit={handleLogin} className="bg-white/10 backdrop-blur-sm border border-white/20 rounded-2xl p-6 space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-blue-200 mb-1">Password</label>
+              <input type="password" value={password} onChange={e=>setPassword(e.target.value)}
+                placeholder="Enter your password" autoFocus autoComplete="current-password" className={inputCls}/>
+            </div>
+            {err&&<div className="p-3 bg-red-900/30 border border-red-500/40 rounded-lg text-red-300 text-sm">{err}</div>}
+            <button type="submit" disabled={!password} className={btnCls}>Sign In</button>
+            <div className="flex justify-between">
+              <button type="button" onClick={()=>{setPhase("email");setPassword("");setErr("");}}
+                className="text-blue-300 text-xs hover:text-white">&larr; Different email</button>
+              <button type="button" onClick={()=>{UserCreds.clear(email);setPassword("");setConfirmPw("");setPhase("setup");setErr("");}}
+                className="text-blue-300 text-xs hover:text-white">Reset password</button>
+            </div>
+          </form>
         )}
       </div>
     </div>
@@ -865,7 +979,7 @@ export default function App(){
   const [upcHdrs,setUpcHdrs]=useState([]);
   const [mode,setMode]=useState(null);
 
-  if(!session) return <AutoConnectSplash onReady={s=>setSession(s)}/>;
+  if(!session) return <LoginScreen onReady={s=>setSession(s)}/>;
 
   // Show project browser if connected to Ediphi API and no target yet
   if(session.ediphiConnected && !target && !upcItems) {
@@ -947,7 +1061,7 @@ function HeaderBar({session,setSession,upcItems,setUpcItems,setMode,setTarget,mo
         <div className="w-7 h-7 rounded-full bg-blue-100 flex items-center justify-center">
           <span className="text-blue-700 text-xs font-bold">{(session.user.name||"U")[0].toUpperCase()}</span></div>
         <span className="text-xs font-semibold text-gray-700 hidden sm:inline">{session.user.name}</span>
-        <button onClick={()=>{setSession(null);setUpcItems(null);setMode(null);setTarget(null);}} className="text-xs text-gray-500 hover:text-red-600 font-medium">Reconnect</button>
+        <button onClick={()=>{setSession(null);setUpcItems(null);setMode(null);setTarget(null);}} className="text-xs text-gray-500 hover:text-red-600 font-medium">Sign Out</button>
       </div>
     </div>
   );
