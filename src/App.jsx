@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import * as XLSX from "xlsx";
 import Papa from "papaparse";
+import ProcoreSync from "./procore/ProcoreSync.jsx";
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ── SAMPLE TEST DATA ─────────────────────────────────────────────────────────
@@ -1008,7 +1009,7 @@ export default function App(){
             UPC catalog loaded — {upcItems.length.toLocaleString()} items.
             {target?.project&&<span className="text-blue-600 ml-1">Target: {target.project.name} → {target.estimate?.name}</span>}
           </p>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-3 gap-4">
             <button onClick={()=>setMode("takeoff")}
               className="p-6 bg-white border-2 border-gray-200 hover:border-blue-500 rounded-2xl text-left group transition-all shadow-sm hover:shadow-md">
               <div className="text-3xl mb-3">📐</div>
@@ -1027,12 +1028,22 @@ export default function App(){
                 <Badge color="purple">Sage 100/300</Badge><Badge color="teal">Sample</Badge>
               </div>
             </button>
+            <button onClick={()=>setMode("procore")}
+              className="p-6 bg-white border-2 border-gray-200 hover:border-teal-500 rounded-2xl text-left group transition-all shadow-sm hover:shadow-md">
+              <div className="text-3xl mb-3">🔄</div>
+              <h3 className="font-bold text-gray-900 group-hover:text-teal-600">Procore Sync</h3>
+              <p className="text-sm text-gray-500 mt-1">Push estimates to Procore or pull budget line items into Ediphi.</p>
+              <div className="mt-3 flex gap-2 flex-wrap">
+                <Badge color="teal">Pull</Badge><Badge color="orange">Push</Badge><Badge color="gray">Budget</Badge>
+              </div>
+            </button>
           </div>
         </div>
       )}
 
       {upcItems&&mode==="takeoff"&&<TakeoffPipeline upcItems={upcItems} target={target} session={session}/>}
       {upcItems&&mode==="accounting"&&<AccountingPipeline upcItems={upcItems} target={target}/>}
+      {mode==="procore"&&<ProcoreSync session={session} upcItems={upcItems} target={target}/>}
     </div>
   );
 }
