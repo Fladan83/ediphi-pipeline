@@ -1009,14 +1009,16 @@ function TakeoffPipeline({upcItems, target, session}){
   const exportCsv=()=>{
     const cols=["id","name","product","quantity"];
     const esc=v=>{const s=String(v??"");return s.includes(",")?`"${s.replace(/"/g,'""')}"`:s;};
-    const lines=matchState.filter(m=>m.chosen).map((m,i)=>{
+    const lines=[];
+    matchState.forEach((m,idx)=>{
+      if(!m.chosen) return;
       const u=m.chosen;
-      const estMatch = estMatchState[i];
+      const estMatch = estMatchState[idx]; // use original index, not filtered
       const lineItemId = (estMatch && estMatch.action === "overwrite" && estMatch.chosen) ? estMatch.chosen.id : "";
       const name = m.row[fields.name] ?? "";
       const productId = u.id || "";
-      const qty = fields.qty ? (m.row[fields.qty] ?? "") : "";
-      return [lineItemId, name, productId, qty].map(esc).join(",");
+      const qty = fields.qty ? String(m.row[fields.qty] ?? "").trim() : "";
+      lines.push([lineItemId, name, productId, qty].map(esc).join(","));
     });
     const a=document.createElement("a");
     a.href=URL.createObjectURL(new Blob([[cols.join(","),...lines].join("\n")],{type:"text/csv"}));
