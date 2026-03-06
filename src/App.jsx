@@ -127,7 +127,16 @@ function scoreUPC(takeoffRow, upc, fields) {
 
 const MIN_SCORE = 25;
 function getTopMatches(row, upcItems, fields, n=5) {
-  return upcItems.map(u => ({ upc: u, ...scoreUPC(row, u, fields) })).sort((a, b) => b.score - a.score).slice(0, n);
+  const learned = MatchMemory.get(row[fields.name], row[fields.uom]);
+  return upcItems.map(u => {
+    const base = scoreUPC(row, u, fields);
+    // Boost score if this UPC was previously confirmed for this condition
+    if (learned && learned.upcId && learned.upcId === u.id) {
+      base.score = Math.min(100, Math.round(base.score * (1 - LEARN_BOOST) + 100 * LEARN_BOOST));
+      base.learned = true;
+    }
+    return { upc: u, ...base };
+  }).sort((a, b) => b.score - a.score).slice(0, n);
 }
 const confLabel = s => s >= 75 ? {l:"High",c:"green"} : s >= 45 ? {l:"Medium",c:"yellow"} : {l:"Low",c:"red"};
 
@@ -151,10 +160,61 @@ function scoreEstimateMatch(takeoffRow, estItem, fields) {
 }
 
 function getTopEstimateMatches(row, estimateItems, fields, n = 5) {
-  return estimateItems.map(e => ({ item: e, ...scoreEstimateMatch(row, e, fields) }))
-    .sort((a, b) => b.score - a.score).slice(0, n);
+  const learned = MatchMemory.get(row[fields.name], row[fields.uom]);
+  return estimateItems.map(e => {
+    const base = scoreEstimateMatch(row, e, fields);
+    // Boost score if this estimate item was previously confirmed for this condition
+    if (learned && learned.estItemId && learned.estItemId === e.id) {
+      base.score = Math.min(100, Math.round(base.score * (1 - LEARN_BOOST) + 100 * LEARN_BOOST));
+      base.learned = true;
+    }
+    return { item: e, ...base };
+  }).sort((a, b) => b.score - a.score).slice(0, n);
 }
 
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── MATCH MEMORY (localStorage learning) ────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+const MEMORY_KEY = "ediphi_match_memory";
+const MatchMemory = {
+  _cache: null,
+  load() {
+    if (this._cache) return this._cache;
+    try { this._cache = JSON.parse(localStorage.getItem(MEMORY_KEY) || "{}"); }
+    catch { this._cache = {}; }
+    return this._cache;
+  },
+  /** Build a stable lookup key from the condition name (+ optional UoM) */
+  key(name, uom) {
+    return normStr(name) + (uom ? "|" + normStr(uom) : "");
+  },
+  /** Get learned pairing for a condition */
+  get(name, uom) {
+    return this.load()[this.key(name, uom)] || null;
+  },
+  /** Save a confirmed pairing */
+  set(name, uom, upcId, estItemId) {
+    const mem = this.load();
+    mem[this.key(name, uom)] = { upcId: upcId || null, estItemId: estItemId || null, ts: Date.now() };
+    this._cache = mem;
+    try { localStorage.setItem(MEMORY_KEY, JSON.stringify(mem)); } catch {}
+  },
+  /** Save a batch of pairings at once */
+  saveBatch(pairings) {
+    const mem = this.load();
+    pairings.forEach(p => { mem[this.key(p.name, p.uom)] = { upcId: p.upcId || null, estItemId: p.estItemId || null, ts: Date.now() }; });
+    this._cache = mem;
+    try { localStorage.setItem(MEMORY_KEY, JSON.stringify(mem)); } catch {}
+  },
+  /** How many pairings are stored */
+  count() { return Object.keys(this.load()).length; },
+  /** Clear all learned pairings */
+  clear() { this._cache = {}; try { localStorage.removeItem(MEMORY_KEY); } catch {} },
+};
+
+/** Boost factor: if a learned pairing matches, blend the learned score with computed score */
+const LEARN_BOOST = 0.30; // 30% weight to learned match, 70% to computed
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ── EDIPHI API (proxied through /api/ediphi) ─────────────────────────────────
@@ -946,7 +1006,7 @@ function TakeoffPipeline({upcItems, target, session}){
       const top = getTopMatches(row, upcItems, fields);
       const best = top[0];
       const chosen = best.score >= MIN_SCORE ? best.upc : null;
-      upcResults.push({ row, topMatches: top, chosen, score: best.score, confirmed: best.score >= 75, breakdown: best.breakdown });
+      upcResults.push({ row, topMatches: top, chosen, score: best.score, confirmed: best.score >= 75, learned: !!best.learned, breakdown: best.breakdown });
       if (i % 50 === 0) await new Promise(r => setTimeout(r, 0));
     }
 
@@ -969,7 +1029,7 @@ function TakeoffPipeline({upcItems, target, session}){
           const best = top[0];
           const chosen = best.score >= MIN_SCORE ? best.item : null;
           const action = best.score >= 45 ? "overwrite" : "new";
-          estResults.push({ row, topMatches: top, chosen, score: best.score, confirmed: best.score >= 75, action, breakdown: best.breakdown });
+          estResults.push({ row, topMatches: top, chosen, score: best.score, confirmed: best.score >= 75, learned: !!best.learned, action, breakdown: best.breakdown });
           if (i % 50 === 0) await new Promise(r => setTimeout(r, 0));
         }
       }
@@ -1015,6 +1075,7 @@ function TakeoffPipeline({upcItems, target, session}){
     const cols=["id","name","product","quantity"];
     const esc=v=>{const s=String(v??"");return s.includes(",")?`"${s.replace(/"/g,'""')}"`:s;};
     const lines=[];
+    const pairings=[];
     matchState.forEach((m,idx)=>{
       if(!m.chosen) return;
       const u=m.chosen;
@@ -1024,7 +1085,11 @@ function TakeoffPipeline({upcItems, target, session}){
       const productId = u.id || "";
       const qty = fields.qty ? String(m.row[fields.qty] ?? "").trim() : "";
       lines.push([lineItemId, name, productId, qty].map(esc).join(","));
+      // Collect confirmed pairings for learning
+      pairings.push({ name, uom: m.row[fields.uom]||"", upcId: productId, estItemId: lineItemId||null });
     });
+    // Save learned pairings to localStorage
+    if(pairings.length) MatchMemory.saveBatch(pairings);
     const a=document.createElement("a");
     a.href=URL.createObjectURL(new Blob([[cols.join(","),...lines].join("\n")],{type:"text/csv"}));
     a.download=`ediphi_import_${Date.now()}.csv`;a.click();setExported(true);
@@ -1107,7 +1172,10 @@ function TakeoffPipeline({upcItems, target, session}){
       {step===2&&(
         <div className="bg-white rounded-2xl shadow-sm border p-6">
           <div className="flex items-center justify-between mb-3">
-            <h2 className="font-semibold text-lg">Match Review</h2>
+            <div>
+              <h2 className="font-semibold text-lg">Match Review</h2>
+              {MatchMemory.count()>0&&<p className="text-xs text-purple-500 mt-0.5">{MatchMemory.count()} learned pairings applied</p>}
+            </div>
             <div className="flex gap-2 flex-wrap justify-end">
               <Badge color="green">{confirmed_} matched</Badge>
               <Badge color="red">{unmatched_} unmatched</Badge>
@@ -1152,6 +1220,7 @@ function TakeoffPipeline({upcItems, target, session}){
                           <span className="text-gray-800 truncate font-medium">{m.chosen.name}</span>
                           {m.chosen.uom&&<Badge color="gray">{m.chosen.uom}</Badge>}
                           {cf&&<Badge color={cf.c}>{m.score}%</Badge>}
+                          {m.learned&&<Badge color="purple">Learned</Badge>}
                         </div>
                       ):(
                         <span className="text-red-500 italic">No match</span>
@@ -1166,6 +1235,7 @@ function TakeoffPipeline({upcItems, target, session}){
                             <span className="text-gray-800 truncate font-medium">{em.chosen.name}</span>
                             {em.chosen.uom&&<Badge color="gray">{em.chosen.uom}</Badge>}
                             <Badge color="blue">{em.score}%</Badge>
+                            {em.learned&&<Badge color="purple">Learned</Badge>}
                           </div>
                         ):(
                           <span className="text-yellow-600 italic">Add as new</span>
